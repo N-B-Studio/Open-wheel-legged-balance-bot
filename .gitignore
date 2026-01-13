@@ -53,3 +53,23 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# STM32CubeIDE / Eclipse project files and build artifacts
+.project
+.cproject
+.settings/
+.metadata/
+*.launch
+.externalToolBuilders/
+
+# Build folders (common names)
+Debug/
+Release/
+build/
+Build/
+
+# STM32CubeMX
+*.mxproject
+
+# VS Code workspace
+.vscode/
