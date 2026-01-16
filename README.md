@@ -6,6 +6,12 @@ containing STM32 firmware, 3D-print models, and higher-level AI/ROS experiments.
 **This README** gives a quick orientation for the mixed project, how to open and build
 the STM32 firmware with STM32CubeIDE/CubeMX, and where to find the other components.
 
+*Full Build guid availiable**
+<img width="924" height="926" alt="image" src="https://github.com/user-attachments/assets/9723ac1a-3a28-47f2-9543-97611dfd1277" />
+
+**3D print available **
+<img width="869" height="736" alt="image" src="https://github.com/user-attachments/assets/20bd7444-01cf-497f-9a01-75412e5f8c37" />
+
 **Contents**
 - **STM32 firmware**: [STM32-H725-wheel-legged-bot](STM32-H725-wheel-legged-bot)
 - **3D models / prints**: [3D-print](3D-print)
