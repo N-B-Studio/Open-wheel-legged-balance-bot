@@ -45,6 +45,9 @@ typedef struct {
     int32_t raw_max;
 
     uint8_t zero_valid;
+
+    float q_target;     // [rad] 期望关节角
+
 } JointMIT;
 
 /* API */

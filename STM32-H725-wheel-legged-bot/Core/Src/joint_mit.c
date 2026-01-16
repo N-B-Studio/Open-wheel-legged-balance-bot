@@ -83,7 +83,14 @@ void joint_mit_step_1khz(JointMIT *j, int32_t raw_abs)
     }
 
     /* ---------- position ---------- */
-    j->raw_rel = raw_abs - j->raw_zero;
+    /* Handle 14-bit encoder wrap-around: find minimal signed difference */
+    int32_t diff = (int32_t)raw_abs - (int32_t)j->raw_zero;
+    if (diff > 8192) {
+        diff -= 16384;
+    } else if (diff < -8192) {
+        diff += 16384;
+    }
+    j->raw_rel = diff;
 
     /* motor side angle */
     float q_m = (float)j->raw_rel * (TWO_PI / ENC_RES);

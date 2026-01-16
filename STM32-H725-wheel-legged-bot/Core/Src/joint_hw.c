@@ -84,6 +84,10 @@ void joint_update_1khz(Joint* j)
     j->last_err = e;
 
     if (e == 0 && j->mit.zero_valid) {
+
+    	// key controll line
+        j->mit.q_des = j->q_target;
+
         joint_mit_step_1khz(&j->mit, (int32_t)raw);
         odrive_can_set_input_torque(&j->od, j->mit.tau);
     } else {

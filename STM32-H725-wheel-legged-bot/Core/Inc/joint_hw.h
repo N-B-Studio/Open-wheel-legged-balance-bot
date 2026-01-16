@@ -33,7 +33,9 @@ typedef struct {
     float qd_alpha;
     float tau_rate_limit;
 
-    int8_t torque_sign;     // +1 or -1
+    int8_t torque_sign;   // +1 / -1 : torque output direction
+    int8_t enc_sign;      // +1 / -1 : encoder -> q direction (推荐新增)
+    int8_t ik_sign;       // +1 / -1 : geometry IK -> mechanical joint direction
 } JointConfig;
 
 typedef struct {
@@ -45,6 +47,7 @@ typedef struct {
 
     uint16_t last_raw;
     uint8_t  last_err;
+    float q_target;     // [rad] 期望关节角
 } Joint;
 
 void joint_init(Joint* j, const JointConfig* cfg);

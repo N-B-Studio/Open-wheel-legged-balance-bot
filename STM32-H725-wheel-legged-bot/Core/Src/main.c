@@ -69,37 +69,45 @@ static char uart_buf[160];
 static Joint g_joint[JOINT_COUNT];
 
 static const JointConfig g_cfg[JOINT_COUNT] = {
-    // J1
+    // J1: hip_pitch
     {
         .hspi=&hspi1, .cs_port=GPIOE, .cs_pin=GPIO_PIN_15, // Second Encoder CS pin
         .hcan=&hfdcan1, .node_id=2, 					   // O-drive can node Id
         .raw_min=3000, .raw_max=10000, .gear_ratio=1.0f,   // Second Encoder limit | gear_ratio = has second encoder? 1 : gear_ratio
-        .home_raw_abs=8000,                                // Second Home position
+        .home_raw_abs=6100,                                // Second Home position
         .kp=0.45f, .kd=0.025f, .tau_max=0.8f,              // MIT KP value
         .q_db=0.015f, .q_hold_band=0.020f, .qd_alpha=0.05f, .tau_rate_limit=10.0f, // Gear band, better the gear, smaller the number.
-        .torque_sign=-1                                    // Second encoder direction
+		.torque_sign = -1,
+		.ik_sign = -1
     },
-    // J2
+    // J2: knee_pitch
     {
         .hspi=&hspi1, .cs_port=GPIOB, .cs_pin=GPIO_PIN_10,
         .hcan=&hfdcan1, .node_id=6,
-        .raw_min=5000, .raw_max=10000, .gear_ratio=1.0f,
-        .home_raw_abs=7500,
-        .kp=0.35f, .kd=0.025f, .tau_max=0.8f,
+        .raw_min=5000, .raw_max=11700, .gear_ratio=1.0f,
+        .home_raw_abs=11500,
+        .kp=0.55f, .kd=0.03f, .tau_max=1.5f,
         .q_db=0.015f, .q_hold_band=0.020f, .qd_alpha=0.05f, .tau_rate_limit=10.0f,
-        .torque_sign=-1
+		.torque_sign = -1,
+		.ik_sign = -1
     },
-    // J3
+    // J3: hip_roll
     {
         .hspi=&hspi1, .cs_port=GPIOB, .cs_pin=GPIO_PIN_11,
         .hcan=&hfdcan1, .node_id=1,
         .raw_min=2500, .raw_max=4000, .gear_ratio=1.0f,
-        .home_raw_abs=3300,
+        .home_raw_abs=2300,
         .kp=0.45f, .kd=0.025f, .tau_max=0.8f,
         .q_db=0.015f, .q_hold_band=0.020f, .qd_alpha=0.05f, .tau_rate_limit=10.0f,
-        .torque_sign=-1
+		.torque_sign = -1,
+		.ik_sign = -1
     }
 };
+
+
+// FK
+static const LegGeom g_leg = { .l1 = 0.20f, .l2 = 0.20f };
+
 
 /* USER CODE END PV */
 
@@ -206,21 +214,48 @@ int main(void)
           joint_update_1khz(&g_joint[i]);
       }
 
-      // debug print @10Hz
+
+      // =================== 1kHz: traj + IK + update targets ===================
+      static float t = 0.0f;
+      t += 0.006f;                 // ~1Hz 左右（可调）
+
+      float x_cmd = 0.0f;
+
+      // 竖直往返：[-0.30, -0.15]
+      float z_cmd = -0.225f + 0.075f * sinf(t);
+
+      float qh = 0.0f, qk = 0.0f;
+      int ok = leg_ik_2d(x_cmd, z_cmd, &g_leg, &qh, &qk);
+
+      if (ok == 0) {
+          float qh_m = (float)g_cfg[0].ik_sign * qh;
+          float qk_m = (float)g_cfg[1].ik_sign * qk;
+
+          const float alpha_1khz = 0.02f;   // 1kHz 下建议小一点（更顺）
+          g_joint[0].q_target += alpha_1khz * (qh_m - g_joint[0].q_target);
+          g_joint[1].q_target += alpha_1khz * (qk_m - g_joint[1].q_target);
+          g_joint[2].q_target = 0.0f;
+      }
+
+      // =================== 10Hz: print only ===================
       if (++print_ctr >= PRINT_DIV) {
           print_ctr = 0;
 
-          int n = snprintf(uart_buf, sizeof(uart_buf),
-              "[t=%lu] r1=%u r2=%u r3=%u | q1=%ld q2=%ld q3=%ld (mrad)\r\n",
-              (unsigned long)g_tick_1khz,
-              (unsigned)g_joint[0].last_raw,
-              (unsigned)g_joint[1].last_raw,
-              (unsigned)g_joint[2].last_raw,
-              (long)(joint_get_q(&g_joint[0]) * 1000.0f),
-              (long)(joint_get_q(&g_joint[1]) * 1000.0f),
-              (long)(joint_get_q(&g_joint[2]) * 1000.0f));
-
-          HAL_UART_Transmit(&huart1, (uint8_t*)uart_buf, (uint16_t)n, 100);
+          if (ok == 0) {
+              int n = snprintf(uart_buf, sizeof(uart_buf),
+                  "[IK] x=%.3f z=%.3f | qh=%.3f qk=%.3f | ik_sign=(%d,%d)\r\n"
+                  "[J ] meas=(%.3f,%.3f) targ=(%.3f,%.3f) raw=(%u,%u)\r\n",
+                  (double)x_cmd, (double)z_cmd,
+                  (double)qh, (double)qk,
+                  (int)g_cfg[0].ik_sign, (int)g_cfg[1].ik_sign,
+                  (double)joint_get_q(&g_joint[0]), (double)joint_get_q(&g_joint[1]),
+                  (double)g_joint[0].q_target, (double)g_joint[1].q_target,
+                  (unsigned)g_joint[0].last_raw, (unsigned)g_joint[1].last_raw
+              );
+              HAL_UART_Transmit(&huart1, (uint8_t*)uart_buf, (uint16_t)n, 100);
+          } else {
+              HAL_UART_Transmit(&huart1, (uint8_t*)"[IK] unreachable\r\n", 18, 100);
+          }
       }
   }
 
