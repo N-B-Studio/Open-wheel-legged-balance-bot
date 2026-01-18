@@ -39,6 +39,8 @@
 #include "joint_mit.h" // mimic MIT CAN protical controll
 #include "joint_hw.h" // overall joint level control
 #include "leg_kin.h"
+#include "crsf8.h"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -108,6 +110,9 @@ static const JointConfig g_cfg[JOINT_COUNT] = {
 // FK
 static const LegGeom g_leg = { .l1 = 0.20f, .l2 = 0.20f };
 
+// ELSR
+static Crsf8 g_crsf;
+
 
 /* USER CODE END PV */
 
@@ -118,6 +123,20 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+static inline float clampf(float x, float lo, float hi)
+{
+    if (x < lo) return lo;
+    if (x > hi) return hi;
+    return x;
+}
+
+// map int range -> float range
+static inline float mapf(float x, float in_min, float in_max, float out_min, float out_max)
+{
+    float t = (x - in_min) / (in_max - in_min);
+    t = clampf(t, 0.0f, 1.0f);
+    return out_min + t * (out_max - out_min);
+}
 
 /* USER CODE END 0 */
 
@@ -158,6 +177,7 @@ int main(void)
   MX_FDCAN2_Init();
   MX_USART10_UART_Init();
   MX_SPI1_Init();
+  MX_UART7_Init();
   /* USER CODE BEGIN 2 */
 
   // 1) Power enable (Based on board requirements.)
@@ -190,8 +210,13 @@ int main(void)
   // start 1kHz tick
   HAL_TIM_Base_Start_IT(&htim2);
 
-  const char *boot = "\r\n[H725] Joint1 MIT: AS5047P + MiniODrive torque @1kHz\r\n";
-  HAL_UART_Transmit(&huart1, (uint8_t*)boot, (uint16_t)strlen(boot), 100);
+  //const char *boot = "\r\n[H725] Joint1 MIT: AS5047P + MiniODrive torque @1kHz\r\n";
+  //HAL_UART_Transmit(&huart1, (uint8_t*)boot, (uint16_t)strlen(boot), 100);
+
+
+  crsf8_init(&g_crsf, &huart7);
+  crsf8_start_rx_it(&g_crsf);
+  HAL_UART_Transmit(&huart1, (uint8_t*)"\r\n[CRSF] start\r\n", 16, 100);
 
   /* USER CODE END 2 */
 
@@ -222,7 +247,24 @@ int main(void)
       float x_cmd = 0.0f;
 
       // 竖直往返：[-0.30, -0.15]
-      float z_cmd = -0.225f + 0.075f * sinf(t);
+      //float z_cmd = -0.225f + 0.075f * sinf(t);
+
+      // ===== CRSF CH3 -> leg height z_cmd =====
+      // CH3 expected: 180..1800
+      // z_cmd: -0.30 .. -0.10
+      uint16_t ch3 = g_crsf.ch8[2];
+
+      // 可选：做个死区/滤波，避免抖动（先给你简单一阶滤波）
+      static float z_cmd_f = -0.20f;
+      float z_target = mapf((float)ch3, 180.0f, 1800.0f, -0.35f, -0.15f);
+
+      // 低通：1kHz下 alpha 很小就够了
+      const float z_alpha = 0.02f;
+      z_cmd_f += z_alpha * (z_target - z_cmd_f);
+
+      float z_cmd = z_cmd_f;
+
+      // =============== CH3 end ==========================
 
       float qh = 0.0f, qk = 0.0f;
       int ok = leg_ik_2d(x_cmd, z_cmd, &g_leg, &qh, &qk);
@@ -241,6 +283,7 @@ int main(void)
       if (++print_ctr >= PRINT_DIV) {
           print_ctr = 0;
 
+          /*
           if (ok == 0) {
               int n = snprintf(uart_buf, sizeof(uart_buf),
                   "[IK] x=%.3f z=%.3f | qh=%.3f qk=%.3f | ik_sign=(%d,%d)\r\n"
@@ -256,6 +299,23 @@ int main(void)
           } else {
               HAL_UART_Transmit(&huart1, (uint8_t*)"[IK] unreachable\r\n", 18, 100);
           }
+          */
+          uint32_t age = crsf8_age_ms(&g_crsf);
+          uint16_t ch3 = g_crsf.ch8[2];
+          int n = snprintf(uart_buf, sizeof(uart_buf),
+            "[CRSF] age=%lums ok=%lu bad=%lu | ch3=%u z=%.3f | ch=%u %u %u %u %u %u %u %u\r\n",
+            (unsigned long)age,
+            (unsigned long)g_crsf.ok,
+            (unsigned long)g_crsf.bad,
+            (unsigned)ch3,
+            (double)z_cmd,
+            (unsigned)g_crsf.ch8[0], (unsigned)g_crsf.ch8[1], (unsigned)g_crsf.ch8[2], (unsigned)g_crsf.ch8[3],
+            (unsigned)g_crsf.ch8[4], (unsigned)g_crsf.ch8[5], (unsigned)g_crsf.ch8[6], (unsigned)g_crsf.ch8[7]
+          );
+
+          HAL_UART_Transmit(&huart1, (uint8_t*)uart_buf, (uint16_t)n, 100);
+
+
       }
   }
 
@@ -333,6 +393,24 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 	g_tick_flag = 1;
   }
 }
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart == &huart7) {
+        crsf8_on_rx_byte(&g_crsf, g_crsf.rx_byte);
+        HAL_UART_Receive_IT(&huart7, &g_crsf.rx_byte, 1);
+    }
+}
+
+void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
+{
+    if (huart == &huart7) {
+        crsf8_on_uart_error(&g_crsf);
+    }
+}
+
+
+
 
 /* USER CODE END 4 */
 
