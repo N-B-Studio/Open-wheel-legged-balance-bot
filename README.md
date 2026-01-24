@@ -1,5 +1,7 @@
 # Open-wheel-legged-balance-bot
 
+Quick youtube demo: https://www.youtube.com/shorts/ciNFoJqzNs0
+
 Fully 3D-printed, open-source 8-DOF wheel-legged balancing robot — a mixed repository
 containing STM32 firmware, 3D-print models, and higher-level AI/ROS experiments.
 
