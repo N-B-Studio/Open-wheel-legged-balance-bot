@@ -27,20 +27,20 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-//#include "BMI088driver.h"
-#include "BMI088Middleware.h" // IMU reader helper
+#include "BMI088Middleware.h"  /* IMU middleware helper */
+#include "BMI088driver.h"      /* IMU driver */
+
 #include <string.h>
 #include <stdio.h>
-#include "bsp_fdcan.h"  // FD Can helper
-#include <math.h>  
+#include "bsp_fdcan.h"         /* FD-CAN helper */
+#include <math.h>
 
-#include "as5047p.h"    // AS5047x Helper
-#include "odrive_can.h" // Odrive Can communicate helper
-#include "joint_mit.h" // mimic MIT CAN protical controll
-#include "joint_hw.h" // overall joint level control
-#include "leg_kin.h"
-#include "crsf8.h"
-
+#include "as5047p.h"           /* AS5047P encoder driver */
+#include "odrive_can.h"        /* O-Drive CAN communication helper */
+#include "joint_mit.h"         /* MIT CAN protocol control */
+#include "joint_hw.h"          /* Joint-level hardware control */
+#include "leg_kin.h"           /* Leg kinematics */
+#include "crsf8.h"             /* CRSF RC receiver protocol */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -51,9 +51,9 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-// ===== 1kHz loop -> 10Hz print =====
-#define PRINT_DIV               100   // 1kHz/100=10Hz
-#define JOINT_COUNT 3
+/* Main loop: 1kHz update with 10Hz debug output */
+#define PRINT_DIV               100   /* 1kHz / 100 = 10Hz print rate */
+#define JOINT_COUNT             3     /* Three joints: hip_pitch, knee_pitch, hip_roll */
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -71,18 +71,18 @@ static char uart_buf[160];
 static Joint g_joint[JOINT_COUNT];
 
 static const JointConfig g_cfg[JOINT_COUNT] = {
-    // J1: hip_pitch
+    /* Joint 0: Hip pitch */
     {
-        .hspi=&hspi1, .cs_port=GPIOE, .cs_pin=GPIO_PIN_15, // Second Encoder CS pin
-        .hcan=&hfdcan1, .node_id=2, 					   // O-drive can node Id
-        .raw_min=3000, .raw_max=10000, .gear_ratio=1.0f,   // Second Encoder limit | gear_ratio = has second encoder? 1 : gear_ratio
-        .home_raw_abs=6100,                                // Second Home position
-        .kp=0.45f, .kd=0.025f, .tau_max=0.8f,              // MIT KP value
-        .q_db=0.015f, .q_hold_band=0.020f, .qd_alpha=0.05f, .tau_rate_limit=10.0f, // Gear band, better the gear, smaller the number.
-		.torque_sign = -1,
-		.ik_sign = -1
+        .hspi=&hspi1, .cs_port=GPIOE, .cs_pin=GPIO_PIN_15,  /* Second encoder CS pin */
+        .hcan=&hfdcan1, .node_id=2,                         /* O-Drive CAN node ID */
+        .raw_min=3000, .raw_max=10000, .gear_ratio=1.0f,    /* Encoder range and gear ratio */
+        .home_raw_abs=6100,                                 /* Home position */
+        .kp=0.45f, .kd=0.025f, .tau_max=0.8f,               /* MIT control gains and max torque */
+        .q_db=0.015f, .q_hold_band=0.020f, .qd_alpha=0.05f, .tau_rate_limit=10.0f,
+        .torque_sign = -1,
+        .ik_sign = -1
     },
-    // J2: knee_pitch
+    /* Joint 1: Knee pitch */
     {
         .hspi=&hspi1, .cs_port=GPIOB, .cs_pin=GPIO_PIN_10,
         .hcan=&hfdcan1, .node_id=6,
@@ -90,10 +90,10 @@ static const JointConfig g_cfg[JOINT_COUNT] = {
         .home_raw_abs=11500,
         .kp=0.55f, .kd=0.03f, .tau_max=1.5f,
         .q_db=0.015f, .q_hold_band=0.020f, .qd_alpha=0.05f, .tau_rate_limit=10.0f,
-		.torque_sign = -1,
-		.ik_sign = -1
+        .torque_sign = -1,
+        .ik_sign = -1
     },
-    // J3: hip_roll
+    /* Joint 2: Hip roll */
     {
         .hspi=&hspi1, .cs_port=GPIOB, .cs_pin=GPIO_PIN_11,
         .hcan=&hfdcan1, .node_id=1,
@@ -102,17 +102,26 @@ static const JointConfig g_cfg[JOINT_COUNT] = {
         .kp=0.45f, .kd=0.025f, .tau_max=0.8f,
         .q_db=0.015f, .q_hold_band=0.020f, .qd_alpha=0.05f, .tau_rate_limit=10.0f,
 		.torque_sign = -1,
-		.ik_sign = -1
+		.ik_sign = 1
     }
 };
 
 
-// FK
+/* Forward kinematics: leg link lengths */
 static const LegGeom g_leg = { .l1 = 0.20f, .l2 = 0.20f };
 
-// ELSR
+/* RC receiver (CRSF protocol) */
 static Crsf8 g_crsf;
 
+/* IMU state: roll angle and rate */
+typedef struct {
+    float roll;        /* Roll angle (radians) */
+    float roll_rate;   /* Roll rate from gyroscope (rad/s) */
+    uint8_t ok;        /* Valid data flag */
+} ImuState;
+
+static ImuState g_imu = {0};
+static ODriveCan g_wheel = {0};  /* Hub motor O-Drive (CAN node ID 3) */
 
 /* USER CODE END PV */
 
@@ -123,6 +132,8 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+/* Utility: Clamp value to range [lo, hi] */
 static inline float clampf(float x, float lo, float hi)
 {
     if (x < lo) return lo;
@@ -130,13 +141,145 @@ static inline float clampf(float x, float lo, float hi)
     return x;
 }
 
-// map int range -> float range
+/* Utility: Map value from input range to output range */
 static inline float mapf(float x, float in_min, float in_max, float out_min, float out_max)
 {
-    float t = (x - in_min) / (in_max - in_min);
+    float denom = (in_max - in_min);
+    if (fabsf(denom) < 1e-6f) return out_min;
+
+    float t = (x - in_min) / denom;
     t = clampf(t, 0.0f, 1.0f);
     return out_min + t * (out_max - out_min);
 }
+
+/* Inverse kinematics command for leg */
+typedef struct {
+    float x;      /* Forward/backward position (m), currently fixed at 0 */
+    float z;      /* Leg height (m), controlled by RC CH3 */
+    float roll;   /* Hip roll target (rad), controlled by RC CH1 */
+} LegCmd;
+
+/* Update leg command from RC receiver with low-pass filtering */
+static void rc_update_cmd(LegCmd *cmd, const Crsf8 *crsf)
+{
+    /* RC CH3 -> leg height (m), range: -0.30 to -0.10 */
+    uint16_t ch3 = crsf->ch8[2];
+    static float z_f = -0.20f;
+    float z_t = mapf((float)ch3, 180.0f, 1800.0f, -0.30f, -0.10f);
+    z_f += 0.02f * (z_t - z_f);
+    cmd->z = z_f;
+
+    /* RC CH1 -> hip roll (±15 degrees with low-pass filter) */
+    uint16_t ch1 = crsf->ch8[0];
+    static float r_f = 0.0f;
+    float r_t = mapf((float)ch1, 180.0f, 1800.0f,
+                     -15.0f*(float)M_PI/180.0f,
+                      15.0f*(float)M_PI/180.0f);
+    r_f += 0.02f * (r_t - r_f);
+    cmd->roll = r_f;
+
+    cmd->x = 0.0f;  /* Forward/backward position fixed at 0 */
+}
+/* Solve inverse kinematics: Convert leg command to joint targets
+ * Uses roll-led approach to maintain vertical height when rolling */
+static int leg_solve_targets(const LegCmd *cmd, const LegGeom *g,
+                             float *qr, float *qh, float *qk,
+                             float *z_p_out)
+{
+    /* Protect against singular configuration when cosine is too small */
+    float c = cosf(cmd->roll);
+    if (fabsf(c) < 0.2f) c = (c > 0) ? 0.2f : -0.2f;
+
+    /* Key: Adjust projected height to maintain vertical height as roll changes */
+    float z_p = cmd->z / c;
+    int ok = leg_ik_2d(cmd->x, z_p, g, qh, qk);
+    if (ok != 0) return ok;
+
+    *qr = cmd->roll;
+    if (z_p_out) *z_p_out = z_p;
+    return 0;
+}
+/* Apply smoothed joint targets with low-pass filter */
+static void joints_apply_targets(float qr, float qh, float qk)
+{
+    const float a = 0.02f;  /* Low-pass filter coefficient */
+
+    /* Apply sign correction based on IK configuration */
+    float qh_m = (float)g_cfg[0].ik_sign * qh;
+    float qk_m = (float)g_cfg[1].ik_sign * qk;
+    float qr_m = (float)g_cfg[2].ik_sign * qr;
+
+    /* Exponential smoothing of targets */
+    g_joint[0].q_target += a * (qh_m - g_joint[0].q_target);
+    g_joint[1].q_target += a * (qk_m - g_joint[1].q_target);
+    g_joint[2].q_target += a * (qr_m - g_joint[2].q_target);
+}
+
+// ===== IMU state =====
+
+/* Wrap angle to [-π, π] range */
+static inline float wrap_pi(float a)
+{
+    while(a >  (float)M_PI) a -= 2.0f*(float)M_PI;
+    while(a < -(float)M_PI) a += 2.0f*(float)M_PI;
+    return a;
+}
+
+/* 1kHz IMU update using complementary filter for roll angle estimation */
+static int imu_update_1khz(ImuState *s, float dt)
+{
+    float gyro[3], accel[3], temp;
+
+    /* Read raw IMU data from BMI088 sensor */
+    BMI088_read(gyro, accel, &temp);
+
+    /* Driver output units:
+     * - gyro[] in rad/s (BMI088 gyro sensitivity ~0.001065 rad/s per LSB at ±2000dps)
+     * - accel[] in g (gravity units) */
+    float ax = accel[0];
+    float ay = accel[1];
+    float az = accel[2];
+
+    /* Gyroscope rate for X-axis rotation (roll rate) */
+    float roll_rate = gyro[0];
+
+    /* Estimate roll angle from gravity vector in accelerometer readings */
+    float roll_acc = atan2f(ay, -az);
+
+    /* Complementary filter: Fuse gyro integration and accelerometer estimate
+     * Alpha ~0.99-0.999 for 1kHz sampling */
+    const float alpha = 0.995f;
+    float roll_pred = s->roll + roll_rate * dt;
+    s->roll = wrap_pi(alpha * roll_pred + (1.0f - alpha) * roll_acc);
+
+    s->roll_rate = roll_rate;
+    s->ok = 1;
+    return 0;
+}
+
+/* ===== Wheel Balance Control (PD) ===== */
+
+/* Compute wheel torque command for balance using IMU feedback
+ * Applies PD control: proportional to roll angle, derivative to roll rate */
+static float wheel_tau_from_imu(const ImuState *imu)
+{
+    if (!imu->ok) return 0.0f;
+
+    /* PD gains (tuning range: kp=0.2~1.5, kd=0.01~0.10) */
+    const float kp = 0.6f;
+    const float kd = 0.03f;
+
+    /* PD control law: negative feedback stabilizes roll */
+    float tau = -(kp * imu->roll + kd * imu->roll_rate);
+
+    /* Limit output torque (typically 0.1~0.3 Nm for wheel motor) */
+    const float tau_max = 0.25f;
+    if (tau >  tau_max) tau =  tau_max;
+    if (tau < -tau_max) tau = -tau_max;
+    return tau;
+}
+
+
 
 /* USER CODE END 0 */
 
@@ -180,43 +323,55 @@ int main(void)
   MX_UART7_Init();
   /* USER CODE BEGIN 2 */
 
-  // 1) Power enable (Based on board requirements.)
+  /* 1. Enable power supplies (GPIO control) */
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_14, GPIO_PIN_SET);
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_SET);
   HAL_GPIO_WritePin(GPIOC, GPIO_PIN_15, GPIO_PIN_SET);
   HAL_Delay(50);
 
-  // 2) CAN init/start
+  /* 2. Initialize CAN bus and IMU */
   bsp_can_init();
   HAL_Delay(200);
+  uint8_t imu_err = BMI088_init();
+  UNUSED(imu_err);
 
-
-  // init joints
+  /* 3. Initialize all leg joints */
   for (int i = 0; i < JOINT_COUNT; i++) {
-	joint_init(&g_joint[i], &g_cfg[i]);
+    joint_init(&g_joint[i], &g_cfg[i]);
   }
 
-  // enable odrive torque mode
+  /* 4. Enable torque control on all O-Drive motors */
   for (int i = 0; i < JOINT_COUNT; i++) {
-	joint_odrive_enable_torque_mode(&g_joint[i]);
+    joint_odrive_enable_torque_mode(&g_joint[i]);
   }
 
-  // zero to fixed home
+  /* 5. Zero joint encoders to home positions */
   for (int i = 0; i < JOINT_COUNT; i++) {
       (void)joint_zero_to_home(&g_joint[i]);
   }
 
-  
-  // start 1kHz tick
+  /* 6. Initialize wheel O-Drive motor (CAN node 3) */
+  g_wheel.hcan = &hfdcan1;
+  g_wheel.node_id = 3;
+
+  odrive_can_clear_errors(&g_wheel);
+  HAL_Delay(10);
+
+  /* Set O-Drive to torque control mode with passthrough */
+  odrive_can_set_controller_mode(&g_wheel, 1, 1);
+  HAL_Delay(10);
+
+  /* Enable closed-loop control state */
+  odrive_can_set_axis_state(&g_wheel, 8);
+  HAL_Delay(10);
+
+  /* 7. Start 1kHz main loop timer */
   HAL_TIM_Base_Start_IT(&htim2);
 
-  //const char *boot = "\r\n[H725] Joint1 MIT: AS5047P + MiniODrive torque @1kHz\r\n";
-  //HAL_UART_Transmit(&huart1, (uint8_t*)boot, (uint16_t)strlen(boot), 100);
-
-
+  /* 8. Initialize RC receiver and debug UART */
   crsf8_init(&g_crsf, &huart7);
   crsf8_start_rx_it(&g_crsf);
-  HAL_UART_Transmit(&huart1, (uint8_t*)"\r\n[CRSF] start\r\n", 16, 100);
+  HAL_UART_Transmit(&huart1, (uint8_t*)"\r\n[CRSF] Start\r\n", 16, 100);
 
   /* USER CODE END 2 */
 
@@ -234,93 +389,43 @@ int main(void)
       last_tick = g_tick_1khz;
 
 
-      // 1kHz update all joints
+      /* 1kHz: Update all leg joint states */
       for (int i = 0; i < JOINT_COUNT; i++) {
           joint_update_1khz(&g_joint[i]);
       }
 
+      /* 1kHz: Update IMU and apply wheel balance control */
+      imu_update_1khz(&g_imu, 0.001f);
+      float tau = wheel_tau_from_imu(&g_imu);
+      odrive_can_set_input_torque(&g_wheel, tau);
 
-      // =================== 1kHz: traj + IK + update targets ===================
-      static float t = 0.0f;
-      t += 0.006f;                 // ~1Hz 左右（可调）
+      /* 1kHz: Process RC input -> Compute trajectory -> Solve IK -> Update joint targets */
+      static LegCmd cmd;
+      static float z_p_dbg = 0.0f;
+      static float qr=0, qh=0, qk=0;
+      static int ok = 0;
 
-      float x_cmd = 0.0f;
+      rc_update_cmd(&cmd, &g_crsf);
+      ok = leg_solve_targets(&cmd, &g_leg, &qr, &qh, &qk, &z_p_dbg);
+      if (ok == 0) joints_apply_targets(qr, qh, qk);
 
-      // 竖直往返：[-0.30, -0.15]
-      //float z_cmd = -0.225f + 0.075f * sinf(t);
-
-      // ===== CRSF CH3 -> leg height z_cmd =====
-      // CH3 expected: 180..1800
-      // z_cmd: -0.30 .. -0.10
-      uint16_t ch3 = g_crsf.ch8[2];
-
-      // 可选：做个死区/滤波，避免抖动（先给你简单一阶滤波）
-      static float z_cmd_f = -0.20f;
-      float z_target = mapf((float)ch3, 180.0f, 1800.0f, -0.35f, -0.15f);
-
-      // 低通：1kHz下 alpha 很小就够了
-      const float z_alpha = 0.02f;
-      z_cmd_f += z_alpha * (z_target - z_cmd_f);
-
-      float z_cmd = z_cmd_f;
-
-      // =============== CH3 end ==========================
-
-      float qh = 0.0f, qk = 0.0f;
-      int ok = leg_ik_2d(x_cmd, z_cmd, &g_leg, &qh, &qk);
-
-      if (ok == 0) {
-          float qh_m = (float)g_cfg[0].ik_sign * qh;
-          float qk_m = (float)g_cfg[1].ik_sign * qk;
-
-          const float alpha_1khz = 0.02f;   // 1kHz 下建议小一点（更顺）
-          g_joint[0].q_target += alpha_1khz * (qh_m - g_joint[0].q_target);
-          g_joint[1].q_target += alpha_1khz * (qk_m - g_joint[1].q_target);
-          g_joint[2].q_target = 0.0f;
-      }
-
-      // =================== 10Hz: print only ===================
+      /* 10Hz: Debug output to UART (1000ms / 100 = 10Hz) */
       if (++print_ctr >= PRINT_DIV) {
           print_ctr = 0;
 
-          /*
-          if (ok == 0) {
-              int n = snprintf(uart_buf, sizeof(uart_buf),
-                  "[IK] x=%.3f z=%.3f | qh=%.3f qk=%.3f | ik_sign=(%d,%d)\r\n"
-                  "[J ] meas=(%.3f,%.3f) targ=(%.3f,%.3f) raw=(%u,%u)\r\n",
-                  (double)x_cmd, (double)z_cmd,
-                  (double)qh, (double)qk,
-                  (int)g_cfg[0].ik_sign, (int)g_cfg[1].ik_sign,
-                  (double)joint_get_q(&g_joint[0]), (double)joint_get_q(&g_joint[1]),
-                  (double)g_joint[0].q_target, (double)g_joint[1].q_target,
-                  (unsigned)g_joint[0].last_raw, (unsigned)g_joint[1].last_raw
-              );
-              HAL_UART_Transmit(&huart1, (uint8_t*)uart_buf, (uint16_t)n, 100);
-          } else {
-              HAL_UART_Transmit(&huart1, (uint8_t*)"[IK] unreachable\r\n", 18, 100);
-          }
-          */
-          uint32_t age = crsf8_age_ms(&g_crsf);
-          uint16_t ch3 = g_crsf.ch8[2];
+          float tau_dbg = wheel_tau_from_imu(&g_imu);
+          float roll_deg = g_imu.roll * 57.2957795f;   /* Convert radians to degrees */
+          float rate_deg = g_imu.roll_rate * 57.2957795f;
+
           int n = snprintf(uart_buf, sizeof(uart_buf),
-            "[CRSF] age=%lums ok=%lu bad=%lu | ch3=%u z=%.3f | ch=%u %u %u %u %u %u %u %u\r\n",
-            (unsigned long)age,
-            (unsigned long)g_crsf.ok,
-            (unsigned long)g_crsf.bad,
-            (unsigned)ch3,
-            (double)z_cmd,
-            (unsigned)g_crsf.ch8[0], (unsigned)g_crsf.ch8[1], (unsigned)g_crsf.ch8[2], (unsigned)g_crsf.ch8[3],
-            (unsigned)g_crsf.ch8[4], (unsigned)g_crsf.ch8[5], (unsigned)g_crsf.ch8[6], (unsigned)g_crsf.ch8[7]
-          );
+              "[IMU] roll=%.2f deg rate=%.2f deg/s | tau=%.3f Nm\r\n",
+              (double)roll_deg, (double)rate_deg, (double)tau_dbg);
 
           HAL_UART_Transmit(&huart1, (uint8_t*)uart_buf, (uint16_t)n, 100);
-
-
       }
+
+
   }
-
-
-
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -386,22 +491,27 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+/* Timer interrupt callback: Triggers main control loop at 1kHz */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
   if (htim->Instance == TIM2) {
-	g_tick_1khz++;
-	g_tick_flag = 1;
+    g_tick_1khz++;
+    g_tick_flag = 1;  /* Signal main loop to execute */
   }
 }
 
+/* UART receive complete callback: Process incoming RC data byte-by-byte */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart == &huart7) {
         crsf8_on_rx_byte(&g_crsf, g_crsf.rx_byte);
+        /* Restart reception in interrupt mode for next byte */
         HAL_UART_Receive_IT(&huart7, &g_crsf.rx_byte, 1);
     }
 }
 
+/* UART error callback: Handle communication errors gracefully */
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
     if (huart == &huart7) {
